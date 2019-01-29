@@ -33,12 +33,16 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
         A TF symbol for the output of an MLP that takes x as an input.
 
     """
-    #######################
-    #                     #
-    #   YOUR CODE HERE    #
-    #                     #
-    #######################
-    pass
+    out = x
+    for i, h in enumerate(hidden_sizes):
+        last = (i + 1) >= len(hidden_sizes)
+        out = tf.layers.dense(
+            out,
+            h,
+            activation=output_activation if last else activation,
+            use_bias=True,
+        )
+    return out
 
 def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space):
     """
@@ -77,10 +81,16 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, actio
     #   YOUR CODE HERE    #
     #                     #
     #######################
-    # mu = 
-    # log_std = 
-    # pi = 
+    mu = mlp(
+        x, 
+        hidden_sizes=list(hidden_sizes) + [a.shape[-1]],
+        activation=activation, 
+        output_activation=output_activation
+    )
+    log_std = tf.Variable(-0.5 * tf.ones(a.shape[1]))
+    pi = mu + tf.broadcast_to(tf.exp(log_std), tf.shape(mu)) * tf.random_normal(tf.shape(mu))
 
+    # DO NOT EDIT:
     logp = exercise1_1.gaussian_likelihood(a, mu, log_std)
     logp_pi = exercise1_1.gaussian_likelihood(pi, mu, log_std)
     return pi, logp, logp_pi
@@ -93,6 +103,7 @@ if __name__ == '__main__':
 
     from spinup import ppo
     from spinup.exercises.common import print_result
+    import roboschool
     import gym
     import os
     import pandas as pd
@@ -100,7 +111,7 @@ if __name__ == '__main__':
     import time
 
     logdir = "/tmp/experiments/%i"%int(time.time())
-    ppo(env_fn = lambda : gym.make('InvertedPendulum-v2'),
+    ppo(env_fn = lambda : gym.make('RoboschoolInvertedPendulum-v1'),
         ac_kwargs=dict(policy=mlp_gaussian_policy, hidden_sizes=(64,)),
         steps_per_epoch=4000, epochs=20, logger_kwargs=dict(output_dir=logdir))
 

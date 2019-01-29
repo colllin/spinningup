@@ -7,6 +7,7 @@ verify_ssl = true
 
 [packages]
 spinup = {editable = true,path = "."}
+roboschool = {editable = true,path = "./../roboschool"}
 
 [requires]
 python_version = "3.6"
