@@ -33,15 +33,12 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
         A TF symbol for the output of an MLP that takes x as an input.
 
     """
+    output_size = hidden_sizes[-1]
+    hidden_sizes = hidden_sizes[:-1]
     out = x
-    for i, h in enumerate(hidden_sizes):
-        last = (i + 1) >= len(hidden_sizes)
-        out = tf.layers.dense(
-            out,
-            h,
-            activation=output_activation if last else activation,
-            use_bias=True,
-        )
+    for h in hidden_sizes:
+        out = tf.layers.dense(out, h, activation=activation, use_bias=True)
+    out = tf.layers.dense(out, output_size, activation=output_activation, use_bias=True)
     return out
 
 def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space):
@@ -87,7 +84,13 @@ def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, actio
         activation=activation, 
         output_activation=output_activation
     )
-    log_std = tf.Variable(-0.5 * tf.ones(a.shape[1]))
+    log_std = tf.Variable(-0.5 * tf.ones(a.shape[-1]))
+
+    # # Attempt at using mlp (with shared weights) for estimating log_std
+    # basemodel = mlp(x, hidden_sizes=hidden_sizes, activation=activation, output_activation=activation)
+    # mu = tf.layers.dense(basemodel, a.shape[-1], activation=output_activation, use_bias=True)
+    # log_std = tf.layers.dense(basemodel, a.shape[-1], activation=output_activation, use_bias=True)
+
     pi = mu + tf.broadcast_to(tf.exp(log_std), tf.shape(mu)) * tf.random_normal(tf.shape(mu))
 
     # DO NOT EDIT:
