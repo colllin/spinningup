@@ -198,7 +198,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         #   YOUR CODE HERE    #
         #                     #
         #######################
-        pi_targ_eps = tf.random_normal(tf.shape(a_ph), stddev=target_noise)
+        pi_targ_eps = tf.random_normal(tf.shape(pi_targ), stddev=target_noise)
         pi_targ_eps = tf.clip_by_value(pi_targ_eps, -noise_clip, noise_clip)
         pi_targ = tf.clip_by_value(pi_targ + pi_targ_eps, -act_limit, act_limit)
 
@@ -224,6 +224,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     #                     #
     #######################
     q_targ = r_ph + gamma * (1 - d_ph) * tf.minimum(q1_targ, q2_targ)
+    q_targ = tf.stop_gradient(q_targ)
 
     # TD3 losses
     #######################
@@ -382,7 +383,7 @@ if __name__ == '__main__':
         max_ep_len=150,
         seed=args.seed, 
         logger_kwargs=logger_kwargs,
-        epochs=10
+        epochs=50
         )
     
     if args.use_soln:
