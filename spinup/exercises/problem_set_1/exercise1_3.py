@@ -6,6 +6,7 @@ from spinup.algos.td3 import core
 from spinup.algos.td3.td3 import td3 as true_td3
 from spinup.algos.td3.core import get_vars
 from spinup.utils.logx import EpochLogger
+import roboschool
 
 """
 
@@ -166,6 +167,8 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     #           All of your code goes in the space below.                     #
     #                                                                         #
     #=========================================================================#
+    
+    actor_critic_from_placeholders = lambda x_ph, a_ph: actor_critic(x_ph, a_ph, **ac_kwargs)
 
     # Main outputs from computation graph
     with tf.variable_scope('main'):
@@ -174,8 +177,8 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         #   YOUR CODE HERE    #
         #                     #
         #######################
-        # pi, q1, q2, q1_pi = 
-        pass
+        pi, q1, q2, q1_pi = actor_critic_from_placeholders(x_ph, a_ph)
+        pi = tf.squeeze(pi, axis=0)
     
     # Target policy network
     with tf.variable_scope('target'):
@@ -184,8 +187,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         #   YOUR CODE HERE    #
         #                     #
         #######################
-        # pi_targ =
-        pass
+        pi_targ, *_ = actor_critic_from_placeholders(x2_ph, a_ph)
     
     # Target Q networks
     with tf.variable_scope('target', reuse=True):
@@ -196,6 +198,9 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         #   YOUR CODE HERE    #
         #                     #
         #######################
+        pi_targ_eps = tf.random_normal(tf.shape(a_ph), stddev=target_noise)
+        pi_targ_eps = tf.clip_by_value(pi_targ_eps, -noise_clip, noise_clip)
+        pi_targ = tf.clip_by_value(pi_targ + pi_targ_eps, -act_limit, act_limit)
 
         # Target Q-values, using action from smoothed target policy
         #######################
@@ -203,7 +208,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
         #   YOUR CODE HERE    #
         #                     #
         #######################
-        pass
+        _, q1_targ, q2_targ, _ = actor_critic_from_placeholders(x2_ph, pi_targ)
 
     # Experience buffer
     replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
@@ -212,12 +217,13 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     var_counts = tuple(core.count_vars(scope) for scope in ['main/pi', 'main/q1', 'main/q2', 'main'])
     print('\nNumber of parameters: \t pi: %d, \t q1: %d, \t q2: %d, \t total: %d\n'%var_counts)
 
-    # Bellman backup for Q functions, using Clipped Double-Q targets
+    # Bellman backup for Q functions, using Clipped Double-Q gets
     #######################
     #                     #
     #   YOUR CODE HERE    #
     #                     #
     #######################
+    q_targ = r_ph + gamma * (1 - d_ph) * tf.minimum(q1_targ, q2_targ)
 
     # TD3 losses
     #######################
@@ -225,10 +231,11 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     #   YOUR CODE HERE    #
     #                     #
     #######################
-    # pi_loss = 
-    # q1_loss = 
-    # q2_loss = 
-    # q_loss = 
+    pi_loss = -tf.reduce_mean(q1_pi)
+    q1_loss = tf.reduce_mean(tf.pow(q1 - q_targ, 2))
+    q2_loss = tf.reduce_mean(tf.pow(q2 - q_targ, 2))
+    q_loss = q1_loss + q2_loss
+    
 
     #=========================================================================#
     #                                                                         #
@@ -320,8 +327,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
                              r_ph: batch['rews'],
                              d_ph: batch['done']
                             }
-                q_step_ops = [q_loss, q1, q2, train_q_op]
-                outs = sess.run(q_step_ops, feed_dict)
+                outs = sess.run([q_loss, q1, q2, train_q_op], feed_dict)
                 logger.store(LossQ=outs[0], Q1Vals=outs[1], Q2Vals=outs[2])
 
                 if j % policy_delay == 0:
@@ -360,7 +366,7 @@ def td3(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='RoboschoolHalfCheetah-v1')#default='HalfCheetah-v2')
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--exp_name', type=str, default='ex13-td3')
     parser.add_argument('--use_soln', action='store_true')
