@@ -146,7 +146,7 @@ def get_all_datasets(all_logdirs, legend=None, select=None, exclude=None):
 
 
 def make_plots(all_logdirs, legend=None, xaxis=None, values=None, count=False,  
-               font_scale=1.5, smooth=1, select=None, exclude=None, estimator='mean'):
+               font_scale=1.5, smooth=1, select=None, exclude=None, estimator='mean', output_file=None):
     data = get_all_datasets(all_logdirs, legend, select, exclude)
     values = values if isinstance(values, list) else [values]
     condition = 'Condition2' if count else 'Condition1'
@@ -155,6 +155,8 @@ def make_plots(all_logdirs, legend=None, xaxis=None, values=None, count=False,
         plt.figure()
         plot_data(data, xaxis=xaxis, value=value, condition=condition, smooth=smooth, estimator=estimator)
     plt.show()
+    if output_file != None:
+        plt.savefig(output_file)
 
 
 def main():
@@ -169,6 +171,7 @@ def main():
     parser.add_argument('--select', nargs='*')
     parser.add_argument('--exclude', nargs='*')
     parser.add_argument('--est', default='mean')
+    parser.add_argument('--savefig', default=None)
     args = parser.parse_args()
     """
 
@@ -221,7 +224,7 @@ def main():
 
     make_plots(args.logdir, args.legend, args.xaxis, args.value, args.count, 
                smooth=args.smooth, select=args.select, exclude=args.exclude,
-               estimator=args.est)
+               estimator=args.est, output_file=args.savefig)
 
 if __name__ == "__main__":
     main()
