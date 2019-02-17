@@ -150,14 +150,36 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     var_counts = tuple(core.count_vars(scope) for scope in ['main/pi', 'main/q', 'main'])
     print('\nNumber of parameters: \t pi: %d, \t q: %d, \t total: %d\n'%var_counts)
 
+# Experiments
+# 1 - Set polyak back to 0.95 — does the non-bugged version fail in the same way as the bugged version, or a different way?
+# --- Fails in a different way.
+# 2 - We know that the q function is collapsing to 0, which then causes the pi_loss to collapse to zero, resulting in a policy which can't learn. The q loss collapses to 1 — this value must be an artifact of the environment, i.e. r is typically 1 at each time step (for survival?). So, why does the q function collapse to zero? How is the backup initialized? Is the q function being back-propped?  We could try commenting out the q_loss (or setting q_lr=0), and seeing if that changes the problem. In that case, we would expect to see behavior similar to exercise 2.1. If this aligns the behavior with ex2.1, this would indicate that the problem is somewhere in q or q_pi_targ (or their training). If this does not align the behavior with ex2.1, this might indicate that we are leaking gradients from pi_loss to the q function. Can we verify or visualize this?
+# --- When we set q_lr=0, we see that 
+# --- I plotted the change in QLoss on a validation batch before and after optimization — the q function is not learning.
+# 3 - Maybe the next experiment is to figure out why the Q-function is not learning.  It appears to learn at first but then "collapse" to 0.  Why?  It must be one of the train ops?  Either the q_lr is too high, or... there is gradient leaking from the training of pi??  This seems unlikely.  Remember that this is a bug in the actor_critic definition... Is Q unable to output the correct range of values?  And this causes it to collapse to 0?  Let's test the leaky gradient hypothesis.  Let's comment out the train_pi_op and see if Q is still collapsing.
+
     # Bellman backup for Q function
+    q_pi_targ = tf.Print(q_pi_targ, [tf.shape(d_ph)], 'd_ph.shape')
+    q_pi_targ = tf.Print(q_pi_targ, [tf.shape(q_pi_targ)], 'q_pi_targ.shape')
     backup = tf.stop_gradient(r_ph + gamma*(1-d_ph)*q_pi_targ)
+    backup = tf.Print(backup, [tf.shape(backup)], 'backup.shape')
 
     # DDPG losses
+    q_pi = tf.Print(q_pi, [tf.shape(q_pi)], 'q_pi.shape')
     pi_loss = -tf.reduce_mean(q_pi)
+    q = tf.Print(q, [tf.shape(q)], 'q.shape')
     q_loss = tf.reduce_mean((q-backup)**2)
 
     # Separate train ops for pi, q
+    global_step = tf.Variable(0, trainable=False)
+    starter_learning_rate = 0.1
+    learning_rate = tf.train.exponential_decay(starter_learning_rate, global_step,
+                                               100000, 0.96, staircase=True)
+    # Passing global_step to minimize() will increment it at each step.
+    learning_step = (
+        tf.train.GradientDescentOptimizer(learning_rate)
+        .minimize(...my loss..., global_step=global_step)
+    )
     pi_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr)
     q_optimizer = tf.train.AdamOptimizer(learning_rate=q_lr)
     train_pi_op = pi_optimizer.minimize(pi_loss, var_list=get_vars('main/pi'))
@@ -232,6 +254,16 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
             Perform all DDPG updates at the end of the trajectory,
             in accordance with tuning done by TD3 paper authors.
             """
+            # Q-learning validation (before optimization)
+            test_q_batch = replay_buffer.sample_batch(batch_size)
+            test_feed_dict = {x_ph: test_q_batch['obs1'],
+                x2_ph: test_q_batch['obs2'],
+                a_ph: test_q_batch['acts'],
+                r_ph: test_q_batch['rews'],
+                d_ph: test_q_batch['done']
+            }
+            test_q_before = sess.run([q_loss, q], test_feed_dict)
+            
             for _ in range(ep_len):
                 batch = replay_buffer.sample_batch(batch_size)
                 feed_dict = {x_ph: batch['obs1'],
@@ -251,6 +283,11 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
 
             logger.store(EpRet=ep_ret, EpLen=ep_len)
             o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+            
+            # Q-learning validation (after optimization)
+            test_q_after = sess.run([q_loss, q], test_feed_dict)
+            logger.store(EvalDeltaLossQ=test_q_after[0]-test_q_before[0], EvalDeltaQVals=test_q_after[1]-test_q_before[1])
+            
 
         # End of epoch wrap-up
         if t > 0 and t % steps_per_epoch == 0:
@@ -273,6 +310,8 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
             logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
+            logger.log_tabular('EvalDeltaLossQ', average_only=True)
+            logger.log_tabular('EvalDeltaQVals', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
 

@@ -35,7 +35,7 @@ def bugged_mlp_actor_critic(x, a, hidden_sizes=(400,300), activation=tf.nn.relu,
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--env', type=str, default='RoboschoolHalfCheetah-v1')
     parser.add_argument('--h', type=int, default=300)
     parser.add_argument('--l', type=int, default=1)
     parser.add_argument('--num_runs', '-n', type=int, default=3)
@@ -50,7 +50,8 @@ if __name__ == '__main__':
                     start_steps=5000,
                     max_ep_len=150,
                     batch_size=64,
-                    polyak=0.95,
+                    polyak=0.99,
+#                     q_lr=0,
                     **kwargs)
 
     eg = ExperimentGrid(name='ex2-2_ddpg')
@@ -59,5 +60,6 @@ if __name__ == '__main__':
     eg.add('seed', [10*i for i in range(args.num_runs)])
     eg.add('epochs', int(args.total_steps / args.steps_per_epoch))
     eg.add('steps_per_epoch', args.steps_per_epoch)
-    eg.add('bugged', [False, True])
+#     eg.add('bugged', [False, True])
+    eg.add('bugged', [True])
     eg.run(ddpg_with_actor_critic, datestamp=True)
