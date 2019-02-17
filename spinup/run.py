@@ -9,6 +9,7 @@ import os.path as osp
 import string
 import tensorflow as tf
 from textwrap import dedent
+import roboschool
 
 
 # Command line args that will go to ExperimentGrid.run, and must possess unique

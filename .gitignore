@@ -6,3 +6,7 @@ data/
 .python-version
 .idea/
 .vscode/
+dist/
+*.pyc
+
+
