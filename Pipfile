@@ -1,0 +1,13 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+
+[packages]
+spinup = {editable = true,path = "."}
+roboschool = {editable = true,path = "./../roboschool"}
+
+[requires]
+python_version = "3.6"
