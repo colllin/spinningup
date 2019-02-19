@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 import numpy as np
 import tensorflow as tf
 import gym
@@ -45,7 +47,7 @@ Deep Deterministic Policy Gradient (DDPG)
 def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
          steps_per_epoch=5000, epochs=100, replay_size=int(1e6), gamma=0.99, 
          polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, 
-         act_noise=0.1, max_ep_len=1000, logger_kwargs=dict(), save_freq=1):
+         act_noise=0.1, max_ep_len=1000, logger_kwargs=dict(), save_freq=1, find_lr=False):
     """
 
     Args:
@@ -111,6 +113,9 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
 
         save_freq (int): How often (in terms of gap between epochs) to save
             the current policy and value function.
+            
+        find_lr (bool): Whether to run the learning rate finder. Afterward,
+            plot LossQ, LrQ, LossPi, LrPi to evaluate the best learning rate.
 
     """
 
@@ -158,10 +163,22 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
     q_loss = tf.reduce_mean((q-backup)**2)
 
     # Separate train ops for pi, q
+    pi_step = tf.Variable(0, trainable=False)
+    q_step = tf.Variable(0, trainable=False)
+    if find_lr:
+        lr_finder_schedule = lambda global_step: tf.train.exponential_decay(
+            learning_rate=1e-5,
+            global_step=global_step,
+            decay_steps=50000,
+            decay_rate=10,
+            staircase=False,
+        )
+        pi_lr = lr_finder_schedule(global_step=pi_step)
+        q_lr = lr_finder_schedule(global_step=q_step)
     pi_optimizer = tf.train.AdamOptimizer(learning_rate=pi_lr)
     q_optimizer = tf.train.AdamOptimizer(learning_rate=q_lr)
-    train_pi_op = pi_optimizer.minimize(pi_loss, var_list=get_vars('main/pi'))
-    train_q_op = q_optimizer.minimize(q_loss, var_list=get_vars('main/q'))
+    train_pi_op = pi_optimizer.minimize(pi_loss, var_list=get_vars('main/pi'), global_step=pi_step)
+    train_q_op = q_optimizer.minimize(q_loss, var_list=get_vars('main/q'), global_step=q_step)
 
     # Polyak averaging for target variables
     target_update = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
@@ -242,12 +259,12 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
                             }
 
                 # Q-learning update
-                outs = sess.run([q_loss, q, train_q_op], feed_dict)
-                logger.store(LossQ=outs[0], QVals=outs[1])
+                outs = sess.run([q_loss, q, train_q_op, q_lr], feed_dict)
+                logger.store(LossQ=outs[0], QVals=outs[1], LrQ=outs[3])
 
                 # Policy update
-                outs = sess.run([pi_loss, train_pi_op, target_update], feed_dict)
-                logger.store(LossPi=outs[0])
+                outs = sess.run([pi_loss, train_pi_op, target_update, pi_lr], feed_dict)
+                logger.store(LossPi=outs[0], LrPi=outs[3])
 
             logger.store(EpRet=ep_ret, EpLen=ep_len)
             o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
@@ -274,6 +291,9 @@ def ddpg(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0,
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)
+            if find_lr:
+                logger.log_tabular('LrPi', average_only=True)
+                logger.log_tabular('LrQ', average_only=True)
             logger.dump_tabular()
 
 if __name__ == '__main__':
@@ -286,6 +306,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ddpg')
+    parser.add_argument('--find_lr', type=bool, action=store_true)
     args = parser.parse_args()
 
     from spinup.utils.run_utils import setup_logger_kwargs
@@ -293,5 +314,6 @@ if __name__ == '__main__':
 
     ddpg(lambda : gym.make(args.env), actor_critic=core.mlp_actor_critic,
          ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
-         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
+         gamma=args.gamma, seed=args.seed, epochs=args.epochs, find_lr=args.find_lr,
          logger_kwargs=logger_kwargs)
+    
