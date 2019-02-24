@@ -8,5 +8,5 @@ data/
 .vscode/
 dist/
 *.pyc
-
+*.png
 

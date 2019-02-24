@@ -55,6 +55,7 @@ def plot_data(data, xaxis='Epoch', value="AverageEpRet", condition="Condition1",
         plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
 
     plt.tight_layout(pad=0.5)
+	# plt.yscale('log')
 
 def get_datasets(logdir, condition=None):
     """
