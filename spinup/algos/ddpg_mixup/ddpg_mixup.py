@@ -147,7 +147,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
     ac_kwargs['action_space'] = env.action_space
 
     # Inputs to computation graph
-    x_ph, a_ph, x2_ph, r_ph, d_ph = core.placeholders(obs_dim, act_dim, obs_dim, None, None)
+    x_ph, a_ph, x2_ph, r_ph, d_ph = core.placeholders(2*obs_dim, act_dim, 2*obs_dim, None, None)
 
     # Main outputs from computation graph
     with tf.variable_scope('main'):
@@ -160,7 +160,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
         pi_targ, _, q_pi_targ  = actor_critic(x2_ph, a_ph, **ac_kwargs)
 
     # Experience buffer
-    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+    replay_buffer = ReplayBuffer(obs_dim=2*obs_dim, act_dim=act_dim, size=replay_size)
 
     # Count variables
     var_counts = tuple(core.count_vars(scope) for scope in ['main/pi', 'main/q', 'main'])
@@ -213,16 +213,31 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
 
     def test_agent(n=10):
         for j in range(n):
-            o, r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
+#             o, r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
+            o1raw, r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
+            o2raw, *_ = env.step(np.zeros(env.action_space.shape))
+            o2 = o2raw - o1raw
+            o2 = np.concatenate([o2raw, o2])
+            o = o2
+            o1raw = o2raw
             while not(d or (ep_len == max_ep_len)):
                 # Take deterministic actions at test time (noise_scale=0)
-                o, r, d, _ = test_env.step(get_action(o, 0))
+                o2raw, r, d, _ = test_env.step(get_action(o, 0))
                 ep_ret += r
                 ep_len += 1
+                o2 = o2raw - o1raw
+                o2 = np.concatenate([o2raw, o2])
+                o = o2
+                o1raw = o2raw
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
 
     start_time = time.time()
-    o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+    o1raw, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+    o2raw, *_ = env.step(np.zeros(env.action_space.shape))
+    o2 = o2raw - o1raw
+    o2 = np.concatenate([o2raw, o2])
+    o = o2
+    o1raw = o2raw
     total_steps = steps_per_epoch * epochs
 
     # Main loop: collect experience in env and update/log each epoch
@@ -239,7 +254,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             a = env.action_space.sample()
 
         # Step the env
-        o2, r, d, _ = env.step(a)
+        o2raw, r, d, _ = env.step(a)
         ep_ret += r
         ep_len += 1
 
@@ -248,18 +263,24 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
         # that isn't based on the agent's state)
         d = False if ep_len==max_ep_len else d
 
+        o2 = o2raw - o1raw
+        o2 = np.concatenate([o2raw, o2])
+    
         # Store experience to replay buffer
         replay_buffer.store(o, a, r, o2, d)
 
         # Super critical, easy to overlook step: make sure to update 
         # most recent observation!
         o = o2
+        o1raw = o2raw
 
         if d or (ep_len == max_ep_len):
             """
             Perform all DDPG updates at the end of the trajectory,
             in accordance with tuning done by TD3 paper authors.
             """
+#             num_updates = int(np.floor(min(t, replay_size) / batch_size))
+#             for _ in range(num_updates):
             for _ in range(ep_len):
             	# Q-learning batch
                 batch = replay_buffer.sample_batch(batch_size)
@@ -267,7 +288,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
                     q_lam = generate_mixup_lambda(q_mixup_alpha)
                     batch2 = replay_buffer.sample_batch(batch_size)
                     batch = {
-                        k: interpolate(batch[k], batch2[k], q_lam)
+                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], q_lam)
                     for k in batch.keys()}
                 feed_dict = {x_ph: batch['obs1'],
                              x2_ph: batch['obs2'],
@@ -290,7 +311,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
                     pi_lam = generate_mixup_lambda(pi_mixup_alpha)
                     batch2 = replay_buffer.sample_batch(batch_size)
                     batch = {
-                        k: interpolate(batch[k], batch2[k], pi_lam)
+                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], pi_lam)
                     for k in batch.keys()}
                 feed_dict = {x_ph: batch['obs1'],
 							 x2_ph: batch['obs2'],
@@ -308,7 +329,13 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
                     logger.store(LossPi=outs[0])
 
             logger.store(EpRet=ep_ret, EpLen=ep_len)
-            o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+#             o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+            o1raw, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+            o2raw, *_ = env.step(np.zeros(env.action_space.shape))
+            o2 = o2raw - o1raw
+            o2 = np.concatenate([o2raw, o2])
+            o = o2
+            o1raw = o2raw
 
         # End of epoch wrap-up
         if t > 0 and t % steps_per_epoch == 0:
