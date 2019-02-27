@@ -55,7 +55,7 @@ Deep Deterministic Policy Gradient (DDPG)
 """
 def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
          steps_per_epoch=5000, epochs=100, replay_size=int(1e6), gamma=0.99, 
-         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, pi_mixup_alpha=0, q_mixup_alpha=0, batch_size=100, start_steps=10000, 
+         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, mixup_alpha=0, batch_size=100, start_steps=10000, 
          act_noise=0.1, max_ep_len=1000, logger_kwargs=dict(), save_freq=1, find_lr=False):
     """
 
@@ -192,6 +192,8 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
     train_q_op = q_optimizer.minimize(q_loss, var_list=get_vars('main/q'), global_step=q_step)
 
     # Polyak averaging for target variables
+    # TODO: Separate polyak per q and pi? Computed based on LR?
+    polyak = 1 - (5 * tf.minimum(q_lr, pi_lr))
     target_update = tf.group([tf.assign(v_targ, polyak*v_targ + (1-polyak)*v_main)
                               for v_main, v_targ in zip(get_vars('main'), get_vars('target'))])
 
@@ -234,6 +236,10 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
         use the learned policy (with some noise, via act_noise). 
         """
         if t > start_steps:
+            # act_noise_gamma = 1 - pi_lr
+            # act_noise_gamma = .4
+            # act_noise_decayed = act_noise * act_noise_gamma ** np.log(t / start_steps) # Decays to act_noise at t=start_steps, act_noise*gamma at t=10*start_steps, ...
+            # a = get_action(o, act_noise_decayed)
             a = get_action(o, act_noise)
         else:
             a = env.action_space.sample()
@@ -261,13 +267,12 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             in accordance with tuning done by TD3 paper authors.
             """
             for _ in range(ep_len):
-            	# Q-learning batch
                 batch = replay_buffer.sample_batch(batch_size)
-                if q_mixup_alpha > 0:
-                    q_lam = generate_mixup_lambda(q_mixup_alpha)
+                if mixup_alpha > 0:
+                    mixup_lam = generate_mixup_lambda(mixup_alpha)
                     batch2 = replay_buffer.sample_batch(batch_size)
                     batch = {
-                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], q_lam)
+                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], mixup_lam)
                     for k in batch.keys()}
                 feed_dict = {x_ph: batch['obs1'],
                              x2_ph: batch['obs2'],
@@ -284,21 +289,6 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
                     outs = sess.run([q_loss, q, train_q_op], feed_dict)
                     logger.store(LossQ=outs[0], QVals=outs[1])
 
-                # Policy batch
-                batch = replay_buffer.sample_batch(batch_size)
-                if pi_mixup_alpha > 0:
-                    pi_lam = generate_mixup_lambda(pi_mixup_alpha)
-                    batch2 = replay_buffer.sample_batch(batch_size)
-                    batch = {
-                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], pi_lam)
-                    for k in batch.keys()}
-                feed_dict = {x_ph: batch['obs1'],
-							 x2_ph: batch['obs2'],
-                             a_ph: batch['acts'],
-                             r_ph: batch['rews'],
-                             d_ph: batch['done']
-                            }
-                            
                 # Policy update
                 if find_lr:
                     outs = sess.run([pi_loss, train_pi_op, target_update, pi_lr], feed_dict)
