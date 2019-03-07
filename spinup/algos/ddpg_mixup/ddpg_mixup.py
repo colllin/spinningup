@@ -42,6 +42,13 @@ class ReplayBuffer:
                     acts=self.acts_buf[idxs],
                     rews=self.rews_buf[idxs],
                     done=self.done_buf[idxs])
+
+    def to_dataframe(self):
+        df = pd.DataFrame()
+        for bufkey in ['obs1', 'obs2', 'acts', 'rews', 'done']:
+            buf = getattr(self, f'{bufkey}_buf')
+            df[bufkey] = np.concatenate([buf[self.ptr:self.size], buf[:self.ptr])
+        return df
  
 
 class MixupReplayBuffer:
@@ -69,6 +76,10 @@ class MixupReplayBuffer:
                 k: np.minimum(batch[k], b2[k]) if k in ['done','d'] else self.interpolate(batch[k], b2[k], lam=mixup_lambda)
             for k in batch.keys()}
         return batch
+        
+    def to_dataframe(self):
+        return self.replay_buffer.as_dataframe()
+        
 
 
 class ClusteredMixupReplayBuffer:
@@ -453,6 +464,9 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             # Save model
             if (epoch % save_freq == 0) or (epoch == epochs-1):
                 logger.save_state({'env': env}, None)
+                
+                # Save replay buffer
+                replay_buffer.to_dataframe().to_csv(f'{args.exp_name}/replay_buffer.csv', index=False)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
