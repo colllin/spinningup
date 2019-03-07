@@ -74,6 +74,9 @@ def run_policy(env, get_action, max_ep_len=None, num_episodes=100, render=True):
 
 if __name__ == '__main__':
     import argparse
+    import gym
+    import roboschool
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('fpath', type=str)
     parser.add_argument('--len', '-l', type=int, default=0)
@@ -81,8 +84,36 @@ if __name__ == '__main__':
     parser.add_argument('--norender', '-nr', action='store_true')
     parser.add_argument('--itr', '-i', type=int, default=-1)
     parser.add_argument('--deterministic', '-d', action='store_true')
+    parser.add_argument('--env', type=str, default=None)
+    parser.add_argument('--mp4', action='store_true')
     args = parser.parse_args()
     env, get_action = load_policy(args.fpath, 
                                   args.itr if args.itr >=0 else 'last',
                                   args.deterministic)
-    run_policy(env, get_action, args.len, args.episodes, not(args.norender))
+
+    # Use specified env, regardless of whether we successfully loaded any saved env.
+    if args.env is not None:
+        env = gym.make(args.env)
+
+    def run():
+        run_policy(env, get_action, args.len, args.episodes, not(args.norender))
+    if env is not None and args.mp4:
+        import subprocess
+        from xvfbwrapper import Xvfb
+        mp4_out = os.path.join(args.fpath, 'test.mp4')
+        print()
+        print(f'Recording test episodes in {mp4_out}...')
+        Xvfb.SLEEP_TIME_BEFORE_START = 1
+        w, h, d = 1280, 720, 8
+        with Xvfb(width=w, height=h, colordepth=d, extra_args_str='+extension GLX') as xvfb:
+            print(f'Xvfb {os.environ["DISPLAY"]}')
+            env = gym.wrappers.Monitor(env, mp4_out)
+#             subprocess.Popen(
+#                 # -y overwrites existing file (if any)
+#                 f'ffmpeg -f x11grab -y -s {w}x{h} -r {d} -i {os.environ["DISPLAY"]} -c:v libx264 -preset superfast -pix_fmt yuv420p -threads 0 -f flv "{mp4_out}"',
+#                 shell=True
+#             )
+            run()
+    else:
+        run()
+        

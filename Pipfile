@@ -7,7 +7,9 @@ verify_ssl = true
 
 [packages]
 spinup = {editable = true,path = "."}
-roboschool = {editable = true,path = "./../roboschool"}
+xvfbwrapper = {git = "https://github.com/colllin/xvfbwrapper.git"}
+roboschool = "*"
+scikit-learn = "*"
 
 [requires]
 python_version = "3.6"
