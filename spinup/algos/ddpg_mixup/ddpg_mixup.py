@@ -5,7 +5,8 @@ import tensorflow as tf
 import gym
 import time
 import sklearn.cluster
-import itertools
+import collections
+import numpy_indexed as npi
 from tqdm import tqdm
 from spinup.algos.ddpg_mixup import core
 from spinup.algos.ddpg_mixup.core import get_vars
@@ -76,17 +77,22 @@ class ClusteredMixupReplayBuffer:
     """
 
     def __init__(self, *rb_args, n_clusters=32, mixup_alpha=0, cluster_on='obs2,done', batch_size=100, logger=None, **rb_kwargs):
-        self.kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=n_clusters)
+        self.n_clusters = n_clusters
+        self.dirty = True
         self.steps_since_clustered = 0
         self.mixup_alpha = mixup_alpha
         self.batch_size = batch_size
         self.replay_buffer = ReplayBuffer(*rb_args, **rb_kwargs)
+        self.cluster_buf = np.zeros(self.replay_buffer.max_size, dtype=int)
         self.cluster_on = cluster_on.split(',')
+        self.steps_before_recluster = 1e4
         self.logger = logger
 
     def store(self, *args, **kwargs):
+        self.dirty = True
         self.steps_since_clustered += 1
         self.replay_buffer.store(*args, **kwargs)
+        self.predict_cluster(self.replay_buffer.ptr - 1)
 
     def get_data_to_cluster(self):
         cluster_key2buf = {
@@ -100,58 +106,46 @@ class ClusteredMixupReplayBuffer:
         bufs = [b.reshape(-1,1) if b.ndim == 1 else b for b in bufs]
         stacked_bufs = np.hstack(bufs)
         return stacked_bufs[:self.replay_buffer.size]
-        
-    def tail_buf(self, buf, n=1):
-        n = min(int(n), self.replay_buffer.size)
-        i_end = self.replay_buffer.ptr
-        i_start = self.replay_buffer.ptr - n
-        tail = buf[max(0, i_start):i_end]
-        if i_start < 0:
-            tail = np.concatenate([buf[i_start:], tail])
-        return tail
-        
-    def due_for_rebalance(self):
-        if not hasattr(self, 'cluster_counts'):
-            return True
-        curr = self.cluster_counts.sum()
-        prev = curr - self.steps_since_clustered
-        return np.floor(curr / 1e4) != np.floor(prev / 1e4)
-#         return np.ceil(np.log(2*self.replay_buffer.size)) != np.ceil(np.log(2*(self.replay_buffer.size - self.steps_since_clustered))
-#         std_devs_of_max = (self.cluster_counts.max() - self.cluster_counts.mean()) / max(100, self.cluster_counts.std())
-#         return std_devs_of_max > 5
-        
-    def cluster(self, X):
-        clusters, inertia = self.kmeans._labels_inertia_minibatch(X, None)
-        self.cluster_counts = np.zeros(self.kmeans.n_clusters)
-        for c in clusters:
-            self.cluster_counts[c] += 1
-        if self.logger:
-            self.logger.store(
-                ClusterInertia=inertia,
-                MinClusterCounts=self.cluster_counts.min(),
-                MaxClusterCounts=self.cluster_counts.max(),
-                AverageClusterCounts=self.cluster_counts.mean(),
-                StdClusterCounts=self.cluster_counts.std()
-            )
-        return clusters
 
-        
-    def update_clusters(self):
-        if len(self.get_data_to_cluster()) < self.kmeans.n_clusters:
-            self.clusters = {i: [i] for i in range(len(self.get_data_to_cluster()))}
+    def due_for_recluster(self):
+        return self.steps_since_clustered >= self.steps_before_recluster
+    
+    def predict_cluster(self, idx):
+        if hasattr(self, 'kmeans'):
+            self.cluster_buf[idx:idx+1] = self.kmeans.predict(self.get_data_to_cluster()[idx:idx+1])
         else:
-            if self.due_for_rebalance():
-                self.kmeans.fit(self.get_data_to_cluster())
-            else:
-                n_batches = np.ceil(self.steps_since_clustered / self.batch_size)
-                new_cluster_data = self.tail_buf(self.get_data_to_cluster(), n=self.batch_size*n_batches)
-                np.random.shuffle(new_cluster_data.copy())
-                for batch in np.split(new_cluster_data, n_batches):
-                    self.kmeans.partial_fit(batch)
-            sample_clusters = self.cluster(self.get_data_to_cluster())
-            i_cluster = lambda enum_cluster: enum_cluster[1]
-            self.clusters = {c: [i for i,_ in enums] for c,enums in itertools.groupby(sorted(enumerate(sample_clusters), key=i_cluster), key=i_cluster)}
+            # Randomly assign clusters until we fit kmeans.
+            self.cluster_buf[idx:idx+1] = idx % self.n_clusters
+        
+    def recluster(self):
+        data_to_cluster = self.get_data_to_cluster()
+        self.kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.n_clusters)
+        self.cluster_buf[:len(data_to_cluster)] = self.kmeans.fit_predict(data_to_cluster)
         self.steps_since_clustered = 0
+        # self.cluster_counts = np.zeros(self.n_clusters)
+        # for c in self.cluster_buf[:len(data_to_cluster)]:
+        #     self.cluster_counts[c] += 1
+        # self.logger.store(
+        #     ClusterInertia=inertia,
+        #     MinClusterCounts=self.cluster_counts.min(),
+        #     MaxClusterCounts=self.cluster_counts.max(),
+        #     AverageClusterCounts=self.cluster_counts.mean(),
+        #     StdClusterCounts=self.cluster_counts.std()
+        # )
+
+    def update_cluster2idxs(self):
+        sample_clusters = self.cluster_buf[:self.replay_buffer.size]
+        groups = npi.group_by(sample_clusters)
+        self.cluster2idxs = groups.split_array_as_list(np.arange(len(sample_clusters)))
+        self.cluster_counts = groups.count
+#         sample_clusters = self.cluster_buf[:self.replay_buffer.size]
+#         self.cluster2idxs = collections.defaultdict(list)
+#         self.cluster_counts = np.zeros(self.n_clusters)
+#         for idx, cluster in enumerate(sample_clusters):
+#             self.cluster2idxs[cluster].append(idx)
+#             self.cluster_counts[cluster] += 1
+#         self.cluster_counts = self.cluster_counts[:len(self.cluster2idxs.keys())]
+        self.dirty = False
         
     def interpolate(self, a1, a2, lam):
         return lam*a1.astype(float) + (1-lam)*a2.astype(float)        
@@ -167,24 +161,26 @@ class ClusteredMixupReplayBuffer:
         """
         mixup_alpha (float): Optional, will override the mixup_alpha specified when constructing the instance.
         """
-        if self.steps_since_clustered > 0:
-            self.update_clusters()
         if mixup_alpha == None:
             mixup_alpha = self.mixup_alpha
-
+        if self.due_for_recluster():
+            self.recluster()
+        if self.dirty:
+            self.update_cluster2idxs()
+         
         # First, choose <batch_size> clusters at random
-        cluster_p = self.cluster_counts / self.cluster_counts.sum() if hasattr(self, 'cluster_counts') else None
-        batch_clusters = np.random.choice(list(self.clusters.keys()), size=batch_size, p=cluster_p)
+        cluster_p = self.cluster_counts / self.cluster_counts.sum()
+        batch_clusters = np.random.choice(np.arange(len(self.cluster2idxs)), size=batch_size, p=cluster_p)
         
         # Then select a random member from each cluster to form the batch.
-        idxs = [np.random.choice(self.clusters[c]) for c in batch_clusters]
+        idxs = [np.random.choice(self.cluster2idxs[c]) for c in batch_clusters]
         batch = self.collate_batch(idxs)
         
         if mixup_alpha > 0:
             mixup_lambda = np.random.beta(mixup_alpha, mixup_alpha)
             
             # Select another random member from each of THE SAME clusters to form a second batch.
-            idxs = [np.random.choice(self.clusters[c]) for c in batch_clusters]
+            idxs = [np.random.choice(self.cluster2idxs[c]) for c in batch_clusters]
             b2 = self.collate_batch(idxs)
             
             batch = {
@@ -474,12 +470,12 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             if find_lr:
                 logger.log_tabular('LrPi', average_only=True)
                 logger.log_tabular('LrQ', average_only=True)
-            if mixup_n_clusters > 0:
-                logger.log_tabular('ClusterInertia', average_only=True)
-                logger.log_tabular('AverageClusterCounts', average_only=True)
-                logger.log_tabular('StdClusterCounts', average_only=True)
-                logger.log_tabular('MaxClusterCounts', average_only=True)
-                logger.log_tabular('MinClusterCounts', average_only=True)
+#             if mixup_n_clusters > 0:
+#                 logger.log_tabular('ClusterInertia', average_only=True)
+#                 logger.log_tabular('AverageClusterCounts', average_only=True)
+#                 logger.log_tabular('StdClusterCounts', average_only=True)
+#                 logger.log_tabular('MaxClusterCounts', average_only=True)
+#                 logger.log_tabular('MinClusterCounts', average_only=True)
             logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
 

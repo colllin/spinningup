@@ -10,6 +10,7 @@ spinup = {editable = true,path = "."}
 xvfbwrapper = {git = "https://github.com/colllin/xvfbwrapper.git"}
 roboschool = "*"
 scikit-learn = "*"
+numpy-indexed = "*"
 
 [requires]
 python_version = "3.6"
