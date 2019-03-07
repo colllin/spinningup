@@ -4,6 +4,9 @@ import numpy as np
 import tensorflow as tf
 import gym
 import time
+import sklearn.cluster
+import itertools
+from tqdm import tqdm
 from spinup.algos.ddpg_mixup import core
 from spinup.algos.ddpg_mixup.core import get_vars
 from spinup.utils.logx import EpochLogger
@@ -38,15 +41,158 @@ class ReplayBuffer:
                     acts=self.acts_buf[idxs],
                     rews=self.rews_buf[idxs],
                     done=self.done_buf[idxs])
+ 
+
+class MixupReplayBuffer:
+    """
+    Wraps another replay buffer and applies mixup when sampling batches.
+    """
+    def __init__(self, replay_buffer, mixup_alpha=0):
+        self.replay_buffer = replay_buffer
+        self.mixup_alpha = mixup_alpha
+        
+    def store(self, *args, **kwargs):
+        self.replay_buffer.store(*args, **kwargs)
+    
+    def interpolate(self, a1, a2, lam):
+        return lam*a1.astype(float) + (1-lam)*a2.astype(float)        
+        
+    def sample_batch(self, mixup_alpha=None, *args, **kwargs):
+        if mixup_alpha == None:
+            mixup_alpha = self.mixup_alpha
+        batch = self.replay_buffer.sample_batch(*args, **kwargs)
+        if mixup_alpha > 0:
+            mixup_lambda = np.random.beta(mixup_alpha, mixup_alpha)
+            b2 = self.replay_buffer.sample_batch(*args, **kwargs)
+            batch = {
+                k: np.minimum(batch[k], b2[k]) if k in ['done','d'] else self.interpolate(batch[k], b2[k], lam=mixup_lambda)
+            for k in batch.keys()}
+        return batch
 
 
-def interpolate(a1, a2, lam):
-    return lam*a1.astype(float) + (1-lam)*a2.astype(float)
+class ClusteredMixupReplayBuffer:
+    """
+    Performs clustered mixup when sampling batches.
+    """
 
+    def __init__(self, *rb_args, n_clusters=32, mixup_alpha=0, cluster_on='obs2,done', batch_size=100, logger=None, **rb_kwargs):
+        self.kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=n_clusters)
+        self.steps_since_clustered = 0
+        self.mixup_alpha = mixup_alpha
+        self.batch_size = batch_size
+        self.replay_buffer = ReplayBuffer(*rb_args, **rb_kwargs)
+        self.cluster_on = cluster_on.split(',')
+        self.logger = logger
 
-def generate_mixup_lambda(alpha):
-    return np.random.beta(alpha, alpha)
+    def store(self, *args, **kwargs):
+        self.steps_since_clustered += 1
+        self.replay_buffer.store(*args, **kwargs)
 
+    def get_data_to_cluster(self):
+        cluster_key2buf = {
+            'obs1': self.replay_buffer.obs1_buf,
+            'obs2': self.replay_buffer.obs2_buf,
+            'acts': self.replay_buffer.acts_buf,
+            'rews': self.replay_buffer.rews_buf,
+            'done': self.replay_buffer.done_buf,
+        }
+        bufs = [cluster_key2buf[k] for k in self.cluster_on]
+        bufs = [b.reshape(-1,1) if b.ndim == 1 else b for b in bufs]
+        stacked_bufs = np.hstack(bufs)
+        return stacked_bufs[:self.replay_buffer.size]
+        
+    def tail_buf(self, buf, n=1):
+        n = min(int(n), self.replay_buffer.size)
+        i_end = self.replay_buffer.ptr
+        i_start = self.replay_buffer.ptr - n
+        tail = buf[max(0, i_start):i_end]
+        if i_start < 0:
+            tail = np.concatenate([buf[i_start:], tail])
+        return tail
+        
+    def due_for_rebalance(self):
+        if not hasattr(self, 'cluster_counts'):
+            return True
+        curr = self.cluster_counts.sum()
+        prev = curr - self.steps_since_clustered
+        return np.floor(curr / 1e4) != np.floor(prev / 1e4)
+#         return np.ceil(np.log(2*self.replay_buffer.size)) != np.ceil(np.log(2*(self.replay_buffer.size - self.steps_since_clustered))
+#         std_devs_of_max = (self.cluster_counts.max() - self.cluster_counts.mean()) / max(100, self.cluster_counts.std())
+#         return std_devs_of_max > 5
+        
+    def cluster(self, X):
+        clusters, inertia = self.kmeans._labels_inertia_minibatch(X, None)
+        self.cluster_counts = np.zeros(self.kmeans.n_clusters)
+        for c in clusters:
+            self.cluster_counts[c] += 1
+        if self.logger:
+            self.logger.store(
+                ClusterInertia=inertia,
+                MinClusterCounts=self.cluster_counts.min(),
+                MaxClusterCounts=self.cluster_counts.max(),
+                AverageClusterCounts=self.cluster_counts.mean(),
+                StdClusterCounts=self.cluster_counts.std()
+            )
+        return clusters
+
+        
+    def update_clusters(self):
+        if len(self.get_data_to_cluster()) < self.kmeans.n_clusters:
+            self.clusters = {i: [i] for i in range(len(self.get_data_to_cluster()))}
+        else:
+            if self.due_for_rebalance():
+                self.kmeans.fit(self.get_data_to_cluster())
+            else:
+                n_batches = np.ceil(self.steps_since_clustered / self.batch_size)
+                new_cluster_data = self.tail_buf(self.get_data_to_cluster(), n=self.batch_size*n_batches)
+                np.random.shuffle(new_cluster_data.copy())
+                for batch in np.split(new_cluster_data, n_batches):
+                    self.kmeans.partial_fit(batch)
+            sample_clusters = self.cluster(self.get_data_to_cluster())
+            i_cluster = lambda enum_cluster: enum_cluster[1]
+            self.clusters = {c: [i for i,_ in enums] for c,enums in itertools.groupby(sorted(enumerate(sample_clusters), key=i_cluster), key=i_cluster)}
+        self.steps_since_clustered = 0
+        
+    def interpolate(self, a1, a2, lam):
+        return lam*a1.astype(float) + (1-lam)*a2.astype(float)        
+        
+    def collate_batch(self, idxs):
+        return dict(obs1=self.replay_buffer.obs1_buf[idxs],
+                    obs2=self.replay_buffer.obs2_buf[idxs],
+                    acts=self.replay_buffer.acts_buf[idxs],
+                    rews=self.replay_buffer.rews_buf[idxs],
+                    done=self.replay_buffer.done_buf[idxs])
+                    
+    def sample_batch(self, batch_size=32, mixup_alpha=None):
+        """
+        mixup_alpha (float): Optional, will override the mixup_alpha specified when constructing the instance.
+        """
+        if self.steps_since_clustered > 0:
+            self.update_clusters()
+        if mixup_alpha == None:
+            mixup_alpha = self.mixup_alpha
+
+        # First, choose <batch_size> clusters at random
+        cluster_p = self.cluster_counts / self.cluster_counts.sum() if hasattr(self, 'cluster_counts') else None
+        batch_clusters = np.random.choice(list(self.clusters.keys()), size=batch_size, p=cluster_p)
+        
+        # Then select a random member from each cluster to form the batch.
+        idxs = [np.random.choice(self.clusters[c]) for c in batch_clusters]
+        batch = self.collate_batch(idxs)
+        
+        if mixup_alpha > 0:
+            mixup_lambda = np.random.beta(mixup_alpha, mixup_alpha)
+            
+            # Select another random member from each of THE SAME clusters to form a second batch.
+            idxs = [np.random.choice(self.clusters[c]) for c in batch_clusters]
+            b2 = self.collate_batch(idxs)
+            
+            batch = {
+                k: np.minimum(batch[k], b2[k]) if k in ['done','d'] else self.interpolate(batch[k], b2[k], lam=mixup_lambda)
+            for k in batch.keys()}
+
+        return batch
+                           
 
 """
 
@@ -55,7 +201,7 @@ Deep Deterministic Policy Gradient (DDPG)
 """
 def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
          steps_per_epoch=5000, epochs=100, replay_size=int(1e6), gamma=0.99, 
-         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, mixup_alpha=0, batch_size=100, start_steps=10000, 
+         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, mixup_alpha=0, mixup_n_clusters=0, mixup_cluster_on='obs1,done', batch_size=100, start_steps=10000, 
          act_noise=0.1, max_ep_len=1000, logger_kwargs=dict(), save_freq=1, find_lr=False):
     """
 
@@ -160,7 +306,17 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
         pi_targ, _, q_pi_targ  = actor_critic(x2_ph, a_ph, **ac_kwargs)
 
     # Experience buffer
-    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+    if mixup_n_clusters > 0:
+        assert mixup_alpha > 0, 'Did you mean to specify mixup_alpha=0 with mixup_n_clusters > 0?'
+        replay_buffer = ClusteredMixupReplayBuffer(
+            n_clusters=mixup_n_clusters, mixup_alpha=mixup_alpha, cluster_on=mixup_cluster_on, batch_size=batch_size,
+            obs_dim=obs_dim, act_dim=act_dim, size=replay_size,
+            logger=logger
+        )
+    else:
+        replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+        if mixup_alpha > 0:
+            replay_buffer = MixupReplayBuffer(replay_buffer, mixup_alpha=mixup_alpha)
 
     # Count variables
     var_counts = tuple(core.count_vars(scope) for scope in ['main/pi', 'main/q', 'main'])
@@ -228,7 +384,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
     total_steps = steps_per_epoch * epochs
 
     # Main loop: collect experience in env and update/log each epoch
-    for t in range(total_steps):
+    for t in tqdm(range(total_steps)):
 
         """
         Until start_steps have elapsed, randomly sample actions
@@ -268,12 +424,6 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             """
             for _ in range(ep_len):
                 batch = replay_buffer.sample_batch(batch_size)
-                if mixup_alpha > 0:
-                    mixup_lam = generate_mixup_lambda(mixup_alpha)
-                    batch2 = replay_buffer.sample_batch(batch_size)
-                    batch = {
-                        k: np.minimum(batch['done'], batch2['done']) if k == 'done' else interpolate(batch[k], batch2[k], mixup_lam)
-                    for k in batch.keys()}
                 feed_dict = {x_ph: batch['obs1'],
                              x2_ph: batch['obs2'],
                              a_ph: batch['acts'],
@@ -321,10 +471,16 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
             logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('LossQ', average_only=True)
-            logger.log_tabular('Time', time.time()-start_time)
             if find_lr:
                 logger.log_tabular('LrPi', average_only=True)
                 logger.log_tabular('LrQ', average_only=True)
+            if mixup_n_clusters > 0:
+                logger.log_tabular('ClusterInertia', average_only=True)
+                logger.log_tabular('AverageClusterCounts', average_only=True)
+                logger.log_tabular('StdClusterCounts', average_only=True)
+                logger.log_tabular('MaxClusterCounts', average_only=True)
+                logger.log_tabular('MinClusterCounts', average_only=True)
+            logger.log_tabular('Time', time.time()-start_time)
             logger.dump_tabular()
 
 if __name__ == '__main__':
