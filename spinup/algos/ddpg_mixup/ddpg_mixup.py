@@ -7,6 +7,7 @@ import time
 import sklearn.cluster
 import collections
 import numpy_indexed as npi
+import pandas as pd
 from tqdm import tqdm
 from spinup.algos.ddpg_mixup import core
 from spinup.algos.ddpg_mixup.core import get_vars
@@ -47,7 +48,7 @@ class ReplayBuffer:
         df = pd.DataFrame()
         for bufkey in ['obs1', 'obs2', 'acts', 'rews', 'done']:
             buf = getattr(self, f'{bufkey}_buf')
-            df[bufkey] = np.concatenate([buf[self.ptr:self.size], buf[:self.ptr])
+            df[bufkey] = np.concatenate([buf[self.ptr:self.size], buf[:self.ptr]]).tolist()
         return df
  
 
@@ -78,7 +79,7 @@ class MixupReplayBuffer:
         return batch
         
     def to_dataframe(self):
-        return self.replay_buffer.as_dataframe()
+        return self.replay_buffer.to_dataframe()
         
 
 
@@ -466,7 +467,7 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
                 logger.save_state({'env': env}, None)
                 
                 # Save replay buffer
-                replay_buffer.to_dataframe().to_csv(f'{args.exp_name}/replay_buffer.csv', index=False)
+                replay_buffer.to_dataframe().to_csv(f'{logger.output_dir}/replay_buffer.csv', index=False)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
