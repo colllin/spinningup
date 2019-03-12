@@ -4,9 +4,7 @@ import numpy as np
 import tensorflow as tf
 import gym
 import time
-import sklearn.cluster
 import collections
-import numpy_indexed as npi
 import pandas as pd
 from tqdm import tqdm
 from spinup.algos.ddpg_mixup import core
@@ -89,6 +87,8 @@ class ClusteredMixupReplayBuffer:
     """
 
     def __init__(self, *rb_args, n_clusters=32, mixup_alpha=0, cluster_on='obs2,done', batch_size=100, logger=None, **rb_kwargs):
+        import sklearn.cluster
+        import numpy_indexed as npi
         self.n_clusters = n_clusters
         self.dirty = True
         self.steps_since_clustered = 0
@@ -202,15 +202,97 @@ class ClusteredMixupReplayBuffer:
         return batch
                            
 
+class LSHMixupReplayBuffer:
+    """
+    Performs mixup with neighboring timesteps based on LSH when sampling batches.
+    """
+
+    def __init__(self, *rb_args, n_lsh_projection_bits=10, mixup_alpha=0, cluster_on='obs2,done', logger=None, **rb_kwargs):
+        self.n_lsh_projection_bits = n_lsh_projection_bits
+        self.mixup_alpha = mixup_alpha
+        self.replay_buffer = ReplayBuffer(*rb_args, **rb_kwargs)
+        self.cluster_on = cluster_on.split(',')
+        # self.logger = logger
+
+    def store(self, *args, **kwargs):
+        self.replay_buffer.store(*args, **kwargs)
+        self.update_lsh(self.replay_buffer.ptr - 1)
+
+    def get_data_to_cluster(self):
+        cluster_key2buf = {
+            'obs1': self.replay_buffer.obs1_buf,
+            'obs2': self.replay_buffer.obs2_buf,
+            'acts': self.replay_buffer.acts_buf,
+            'rews': self.replay_buffer.rews_buf,
+            'done': self.replay_buffer.done_buf,
+        }
+        bufs = [cluster_key2buf[k] for k in self.cluster_on]
+        bufs = [b.reshape(-1,1) if b.ndim == 1 else b for b in bufs]
+        stacked_bufs = np.hstack(bufs)
+        return stacked_bufs[:self.replay_buffer.size]
+
+    def init_engine(self, vector_size):
+        import nearpy
+        rbp = nearpy.hashes.RandomBinaryProjections('rbp', self.n_lsh_projection_bits)
+        self.engine = nearpy.Engine(vector_size, lshashes=[rbp], distance=None)
+
+    def update_lsh(self, idx):
+        if not hasattr(self, 'engine'):
+            sample_vector = self.get_data_to_cluster()[0]
+            self.init_engine(sample_vector.shape[0])
+        self.engine.delete_vector(idx, self.get_data_to_cluster()[idx])
+        self.engine.store_vector(self.get_data_to_cluster()[idx], idx)
+        
+    def sample_idx_neighbors(self, batch_idxs):
+        query = lambda idx: self.get_data_to_cluster()[idx]
+        all_neighbors_idxs = lambda q: np.array(self.engine.neighbours(q))[:,1] # neighbors are list of (vector, idx, distance)
+        random_neighbors_idxs = [np.random.choice(all_neighbors_idxs(query(idx))) for idx in batch_idxs]
+        print(random_neighbors_idxs[:5])
+        return random_neighbors_idxs
+        
+    def interpolate(self, a1, a2, lam):
+        return lam*a1.astype(float) + (1-lam)*a2.astype(float)
+        
+    def collate_batch(self, idxs):
+        return dict(obs1=self.replay_buffer.obs1_buf[idxs],
+                    obs2=self.replay_buffer.obs2_buf[idxs],
+                    acts=self.replay_buffer.acts_buf[idxs],
+                    rews=self.replay_buffer.rews_buf[idxs],
+                    done=self.replay_buffer.done_buf[idxs])
+                    
+    def sample_batch(self, batch_size=32, mixup_alpha=None):
+        """
+        mixup_alpha (float): Optional, will override the mixup_alpha specified when constructing the instance.
+        """
+        if mixup_alpha == None:
+            mixup_alpha = self.mixup_alpha
+         
+        batch_idxs = np.random.randint(0, self.replay_buffer.size, size=batch_size)
+        batch = self.collate_batch(batch_idxs)
+        
+        if mixup_alpha > 0:
+            mixup_lambda = np.random.beta(mixup_alpha, mixup_alpha)
+        
+            batch_neighbor_idxs = self.sample_idx_neighbors(batch_idxs)
+            b2 = self.collate_batch(batch_neighbor_idxs)
+            
+            batch = {
+                k: np.minimum(batch[k], b2[k]) if k in ['done','d'] else self.interpolate(batch[k], b2[k], lam=mixup_lambda)
+            for k in batch.keys()}
+
+        return batch
+                           
+
 """
 
 Deep Deterministic Policy Gradient (DDPG)
 
 """
 def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), seed=0, 
-         steps_per_epoch=5000, epochs=100, replay_size=int(1e6), gamma=0.99, 
-         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, mixup_alpha=0, mixup_n_clusters=0, mixup_cluster_on='obs1,done', batch_size=100, start_steps=10000, 
-         act_noise=0.1, max_ep_len=1000, logger_kwargs=dict(), save_freq=1, find_lr=False):
+         steps_per_epoch=5000, epochs=100, replay_size=int(1e6), gamma=0.99, polyak=0.995, 
+         pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000, act_noise=0.1, max_ep_len=1000,
+         mixup_alpha=0, mixup_n_clusters=0, mixup_lsh_bits=0, mixup_cluster_on='obs1,done', 
+         logger_kwargs=dict(), save_freq=1, find_lr=False):
     """
 
     Args:
@@ -314,7 +396,16 @@ def ddpg_mixup(env_fn, actor_critic=core.mlp_actor_critic, ac_kwargs=dict(), see
         pi_targ, _, q_pi_targ  = actor_critic(x2_ph, a_ph, **ac_kwargs)
 
     # Experience buffer
-    if mixup_n_clusters > 0:
+    if mixup_lsh_bits > 0:
+        assert mixup_alpha > 0, 'Did you mean to specify mixup_alpha=0 with mixup_lsh_bits > 0?'
+        replay_buffer = LSHMixupReplayBuffer(
+            n_lsh_projection_bits=mixup_lsh_bits,
+            mixup_alpha=mixup_alpha,
+            cluster_on=mixup_cluster_on,
+            obs_dim=obs_dim, act_dim=act_dim, size=replay_size,
+            logger=logger
+        )
+    elif mixup_n_clusters > 0:
         assert mixup_alpha > 0, 'Did you mean to specify mixup_alpha=0 with mixup_n_clusters > 0?'
         replay_buffer = ClusteredMixupReplayBuffer(
             n_clusters=mixup_n_clusters, mixup_alpha=mixup_alpha, cluster_on=mixup_cluster_on, batch_size=batch_size,

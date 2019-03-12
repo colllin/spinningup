@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "6c27e6874b0694106edfd73cb17fbb88b6ee766af21bc658e62cd23d7d47d5c5"
+            "sha256": "70763b1e02cc5a9004eaed7dfd213234495e5bd378aa086383eb1e437a25f561"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -62,6 +62,12 @@
             ],
             "version": "==0.1.0"
         },
+        "bitarray": {
+            "hashes": [
+                "sha256:050cd30b810ddb3aa941e7ddfbe0d8065e793012d0a88cb5739ec23624b9895e"
+            ],
+            "version": "==0.8.3"
+        },
         "box2d-py": {
             "hashes": [
                 "sha256:4e4c23f454bcf26d2cedf2d46e5f0651ad4ed518f0d21e14f228cab001ddbcae",
@@ -76,10 +82,10 @@
         },
         "certifi": {
             "hashes": [
-                "sha256:47f9c83ef4c0c621eaef743f133f09fa8a74a9b75f037e8624f83bd1b6626cb7",
-                "sha256:993f830721089fef441cdfeb4b2c8c9df86f0c63239f06bd025a76a7daddb033"
+                "sha256:59b7658e26ca9c7339e00f8f4636cdfe59d34fa37b9b04f6f9e9926b3cece1a5",
+                "sha256:b26104d6835d1f5e49452a26eb2ff87fe7090b89dfcaee5ea2212697e1e1d7ae"
             ],
-            "version": "==2018.11.29"
+            "version": "==2019.3.9"
         },
         "chardet": {
             "hashes": [
@@ -341,6 +347,13 @@
                 "sha256:f063527b2ab1f9d8fb567337999d961b6b9686f27bae214e21545b42168380df"
             ],
             "version": "==3.0.1"
+        },
+        "nearpy": {
+            "hashes": [
+                "sha256:0134b2e6569b8b141973592ef6e3d09f2d186531e0fe3a3d1a83df893df1b425"
+            ],
+            "index": "pypi",
+            "version": "==1.0.0"
         },
         "numpy": {
             "hashes": [
