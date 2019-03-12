@@ -87,8 +87,6 @@ class ClusteredMixupReplayBuffer:
     """
 
     def __init__(self, *rb_args, n_clusters=32, mixup_alpha=0, cluster_on='obs2,done', batch_size=100, logger=None, **rb_kwargs):
-        import sklearn.cluster
-        import numpy_indexed as npi
         self.n_clusters = n_clusters
         self.dirty = True
         self.steps_since_clustered = 0
@@ -130,6 +128,7 @@ class ClusteredMixupReplayBuffer:
             self.cluster_buf[idx:idx+1] = idx % self.n_clusters
         
     def recluster(self):
+        import sklearn.cluster
         data_to_cluster = self.get_data_to_cluster()
         self.kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.n_clusters)
         self.cluster_buf[:len(data_to_cluster)] = self.kmeans.fit_predict(data_to_cluster)
@@ -146,6 +145,7 @@ class ClusteredMixupReplayBuffer:
         # )
 
     def update_cluster2idxs(self):
+        import numpy_indexed as npi
         sample_clusters = self.cluster_buf[:self.replay_buffer.size]
         groups = npi.group_by(sample_clusters)
         self.cluster2idxs = groups.split_array_as_list(np.arange(len(sample_clusters)))
